@@ -1,0 +1,26 @@
+# Generated source + pipeline output — regenerate from the seed, never commit.
+/data/
+
+# Build artifacts
+/dist/
+*.egg-info/
+
+# uv / venv
+.venv/
+
+# Spark local metastore / warehouse noise
+spark-warehouse/
+metastore_db/
+derby.log
+
+# Python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store

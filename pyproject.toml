@@ -1,0 +1,64 @@
+# ---------------------------------------------------------------------------
+# sonicwave-ingest — the versioned package that holds ALL the ingestion logic.
+# The entry-point scripts stay thin; everything real (read → Bronze → Silver,
+# validation, SCD2) lives in this wheel, where it is typed, tested, and shipped.
+#
+# The commands you run locally are the EXACT commands CI runs on a clean runner:
+#
+#   uv run pytest -q               # tests
+#   uv run ruff check .            # lint
+#   uv run ruff format --check .   # formatting
+#   uv run mypy                    # static types
+#   uv build                       # sdist + wheel into dist/
+# ---------------------------------------------------------------------------
+
+[project]
+name = "sonicwave-ingest"
+version = "0.1.0"
+description = "Idempotent Bronze -> Silver ingestion pipeline for SonicWave daily source drops (PySpark)."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pyspark==4.0.0",
+]
+
+# Dev-only tooling (PEP 735 dependency group). `uv sync` installs it by
+# default, so `uv run pytest` / `ruff` / `mypy` work with no extra flags —
+# locally AND in CI.
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "pre-commit>=3.7",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sonicwave_ingest"]
+
+# ---------------------------------------------------------------------------
+# Tooling config — one file, one source of truth. CI and your machine read the
+# SAME settings, so "passes locally" and "passes in CI" can't drift.
+# ---------------------------------------------------------------------------
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["src"]
+disallow_untyped_defs = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
