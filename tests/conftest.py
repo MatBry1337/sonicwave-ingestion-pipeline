@@ -15,6 +15,7 @@ def spark() -> Iterator[SparkSession]:
         .appName("sonicwave-ingest-tests")
         .config("spark.sql.shuffle.partitions", "1")
         .config("spark.sql.sources.partitionOverwriteMode", "dynamic")
+        .config("spark.sql.session.timeZone", "UTC")
         .config("spark.ui.enabled", "false")
         .config("spark.driver.bindAddress", "127.0.0.1")
         .getOrCreate()
