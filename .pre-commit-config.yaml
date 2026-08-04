@@ -1,11 +1,6 @@
-# Pre-commit: run the SAME checks as CI, automatically, before each commit.
-#
-#   uv run pre-commit install         # one-time: wire the git hook
-#   git commit ...                    # hooks now run on the staged files
-#   uv run pre-commit run --all-files # run them by hand over the whole repo
-#
-# These hooks reuse THIS project's environment via `uv run` (language: system),
-# so ruff is the version pinned in the dev group and mypy sees PySpark's types.
+# Runs ruff and mypy before each commit. `uv run pre-commit install` to wire it.
+# Hooks use uv (language: system) so they share the project's pinned tools and
+# mypy sees PySpark's types.
 repos:
   - repo: local
     hooks:
@@ -26,6 +21,4 @@ repos:
         entry: uv run mypy
         language: system
         types_or: [python, pyi]
-        # Type-check the whole `src/` tree (matching [tool.mypy] files=["src"]),
-        # not just the changed filenames — so mypy always sees the full package.
         pass_filenames: false

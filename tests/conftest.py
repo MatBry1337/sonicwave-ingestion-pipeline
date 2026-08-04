@@ -1,10 +1,4 @@
-"""Shared pytest fixtures.
-
-`conftest.py` is pytest's magic file: anything defined here is available to
-every test in this tree without an import. The SparkSession fixture lives
-here — one Spark, shared by the whole suite, session-scoped so we pay the JVM
-start-up cost once.
-"""
+"""Shared pytest fixtures — a session-scoped SparkSession so the JVM starts once."""
 
 from __future__ import annotations
 

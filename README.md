@@ -13,14 +13,13 @@ lives in the installable wheel under `src/`.
 
 ## Status
 
-- [x] **Phase 0 — Scaffold**: `src/` package, `pyproject.toml`, CI + release
-      workflows, pre-commit, seed copied, green lint/type/test.
-- [ ] Phase 1 — `plays` source → Bronze → Silver, one snapshot (validate,
-      quarantine, dedup, `event_date`).
-- [ ] Phase 2 — `plays` idempotency (dynamic partition overwrite) + late data.
-- [ ] Phase 3 — `users` SCD2 dimension (union + recompute, change-gated).
-- [ ] Phase 4 — Transform tests (quarantine, dedup, SCD2, late event, schema).
-- [ ] Phase 5 — CI green + defended design decisions written up below.
+- [x] Scaffold: `src/` package, `pyproject.toml`, CI + release workflows, pre-commit.
+- [x] `plays`: source → Bronze → Silver for one snapshot — schema-on-read,
+      quarantine, dedup, `event_date`, partition-overwrite idempotency.
+- [x] `users`: SCD2 dimension — change-gated version history, quarantine, dedup.
+- [x] Tests: transform unit tests plus end-to-end pipeline tests for both tables,
+      including re-run idempotency.
+- [x] CI/CD: lint → type → test gate on every PR; build-once release.
 
 ---
 
@@ -30,9 +29,14 @@ lives in the installable wheel under `src/`.
 uv sync                                    # install package + dev tooling
 uv run python seed/generate_seed.py        # -> ./data/source/<table>/<date>/*.json
 
-# (Phase 1+) run a table through source -> Bronze -> Silver for one day:
-# uv run python -m sonicwave_ingest.entrypoints.ingest_plays \
-#     --source ./data/source/plays --snapshot-date 2026-03-01
+# run a table through source -> Bronze -> Silver for one day:
+uv run python -m sonicwave_ingest.entrypoints.ingest_plays \
+    --source ./data/source/plays --snapshot-date 2026-03-01 --out ./data/warehouse
+uv run python -m sonicwave_ingest.entrypoints.ingest_users \
+    --source ./data/source/users --snapshot-date 2026-03-01 --out ./data/warehouse
+
+# inspect a layer (bronze | silver | quarantine, or an explicit path):
+uv run python scripts/peek.py silver
 ```
 
 ### The quality gate (same commands locally and in CI)
@@ -58,7 +62,11 @@ Requires a JDK on PATH (Spark runs on the JVM) — Java 17 recommended.
 ├── seed/generate_seed.py       # the SOURCE OF TRUTH for the data — commit it
 ├── src/sonicwave_ingest/       # all pipeline logic (the wheel)
 │   ├── spark.py                # shared SparkSession builder
-│   └── ...                     # bronze / silver / scd2 / tables / entrypoints (Phase 1+)
+│   ├── bronze.py               # permissive read + provenance
+│   ├── storage.py              # partitioned Parquet write
+│   ├── tables/                 # per-table schema, validation, conform (plays, users)
+│   └── entrypoints/            # thin CLI scripts, one per table
+├── scripts/peek.py             # dev helper to eyeball a warehouse layer
 ├── tests/                      # pytest + Spark fixture; fast, offline
 └── .github/workflows/          # ci.yml (gate) + release.yml (build-once)
 ```
@@ -71,16 +79,45 @@ the data this pipeline was built and tested against.
 
 ## Design decisions
 
-_To be written as each phase lands — the interesting part of the submission._
-
-- **Bronze / Silver formats** — _why permissive JSON in, typed Parquet out._
-- **Explicit schemas** — _the typed Silver `StructType` per table._
-- **Validation & quarantine** — _which rules reject a row, and where rejects go._
-- **Idempotency** — _`plays`: dynamic partition overwrite by `snapshot_date`;
-  `users`: change-gated SCD2 recompute._
-- **SCD2 ordering key** — _`coalesce(updated_at, created_at)`, and the guard
-  that opens a new version only on a real attribute change._
-- **Event vs ingestion time** — _`event_date` from `played_at` so a late event
-  is dated when it happened, not when it arrived._
-- **Shared vs per-table logic** — _how the common skeleton and the per-table
-  specifics are factored._
+- **Bronze / Silver formats.** Source drops arrive as permissive JSON, every
+  column text, so a malformed value lands rather than failing the read. Bronze
+  preserves that drop as-is; Silver is typed columnar Parquet. The JSON-to-Parquet
+  hop is the only place types and rules get applied, never at read time.
+- **Explicit schemas.** `SILVER_PLAYS_SCHEMA` is the single typed contract.
+  `SOURCE_PLAYS_SCHEMA` (all-string) and the Silver projection are both derived
+  from it, so the read schema and the typed schema cannot drift apart. `users`
+  follows the same pattern.
+- **Validation and quarantine.** Casts use `try_cast`, which returns null rather
+  than raising under Spark's ANSI mode, so a bad value cannot crash the job. A row
+  that fails a required-field cast or the `ms_played >= 0` range rule is tagged
+  with a single `reject_reason` (first failing rule wins) and written to a
+  `quarantine/` path with its raw values intact, so rejects stay inspectable.
+- **`plays` idempotency.** Silver is partitioned by `snapshot_date` and written
+  with dynamic partition overwrite, so re-running a snapshot rewrites only that
+  partition. Dedup uses a `row_number()` window over a total ordering, so the
+  surviving row is defined rather than arbitrary; without a full ordering the
+  winner could flip under a shuffle and break the re-run guarantee. Provenance is
+  deterministic too: `ingested_at` is passed in, not `current_timestamp()`.
+- **Event vs ingestion time.** `event_date` is derived from `played_at`, so a late
+  event (recorded a day after it happened) is dated to when it happened. It still
+  lands physically in its arrival snapshot's partition; `event_date` and
+  `snapshot_date` are separate columns by design.
+- **`users` SCD2.** The dimension is historised, not overwritten row-for-row. Each
+  run unions the incoming snapshot with the current dimension and recomputes
+  `valid_from` / `valid_to` / `is_current` with window functions. Versions are
+  ordered by `coalesce(updated_at, created_at)`: the source leaves `updated_at`
+  null until a row changes, making this the true "effective from" time. A new
+  version opens only when a tracked attribute differs from the previous one (a
+  `lag` over that ordering), so re-ingesting an unchanged snapshot opens nothing.
+  That gate is what makes the SCD2 build idempotent.
+- **Why the dimension is a full overwrite.** `users` Silver is rewritten whole
+  each run, not partitioned by `snapshot_date` like `plays`. An SCD2 version spans
+  a range of snapshots (`valid_from..valid_to`), so it belongs to no single one,
+  and the recompute rewrites the whole table anyway. Reading the current dimension
+  before overwriting its own path needs a `localCheckpoint` to break lineage,
+  otherwise Spark refuses to overwrite a location the query still reads from.
+- **Shared vs per-table logic.** `bronze.read_source` and
+  `storage.write_partitioned` are the shared skeleton. `tables/plays.py` and
+  `tables/users.py` hold the per-table schema, validation, and conform (event-time
+  dating for plays, SCD2 for users). Entry-points only parse args and call
+  `run_plays` / `run_users`.

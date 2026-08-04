@@ -1,10 +1,5 @@
-# =============================================================================
-# CI — the quality gate that runs on every pull request (and every push to main)
-# =============================================================================
-# Nothing more than the checks you run by hand, executed on a clean machine
-# before any change can merge:  lint -> format -> type-check -> test.
-# The package lives at the REPOSITORY ROOT, so no working-directory override.
-# =============================================================================
+# Quality gate on every PR and push to main: lint, format, type-check, test.
+# Same commands you run locally, on a clean runner across Python 3.11 and 3.12.
 
 name: CI
 
@@ -13,7 +8,6 @@ on:
   push:
     branches: [main]
 
-# Cancel an in-progress run when you push again to the same ref.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -31,7 +25,6 @@ jobs:
       - name: Check out the repository
         uses: actions/checkout@v4
 
-      # PySpark runs on the JVM — the runner needs a JDK, like your laptop does.
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
@@ -44,11 +37,9 @@ jobs:
           python-version: ${{ matrix.python-version }}
           enable-cache: true
 
-      # Reproduce the local environment on the runner (installs the dev group).
       - name: Install dependencies
         run: uv sync
 
-      # The gate, cheapest check first; the Spark test suite runs last.
       - name: Lint (ruff)
         run: uv run ruff check .
 

@@ -1,9 +1,4 @@
-"""Scaffold smoke tests — prove the environment and package are wired up.
-
-These are placeholders that keep CI green from commit one. They get replaced by
-real transform tests (quarantine, dedup, SCD2, late-event dating, typed schema)
-as each phase lands.
-"""
+"""Smoke tests: the package imports and Spark can run a job in this environment."""
 
 from __future__ import annotations
 
