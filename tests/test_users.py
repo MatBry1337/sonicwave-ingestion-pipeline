@@ -24,6 +24,10 @@ SOURCE_COLS = ["user_id", "email", "country", "plan_tier", "created_at", "update
 _SOURCE_SCHEMA = StructType([StructField(c, StringType(), True) for c in SOURCE_COLS])
 
 
+def _names_and_types(schema: StructType) -> list[tuple[str, object]]:
+    return [(f.name, f.dataType) for f in schema.fields]
+
+
 def _row(
     user_id: str = "1",
     email: str | None = "alice@sonicwave.io",
@@ -69,9 +73,7 @@ def test_to_typed_matches_declared_schema(spark: SparkSession) -> None:
     """to_typed projects a clean drop to exactly SILVER_USERS_SCHEMA's names+types."""
     df = _source(spark, [_row(user_id="1"), _row(user_id="2", email="bob@sonicwave.io")])
     typed = to_typed(df)
-    got = [(f.name, f.dataType) for f in typed.schema.fields]
-    want = [(f.name, f.dataType) for f in SILVER_USERS_SCHEMA.fields]
-    assert got == want
+    assert _names_and_types(typed.schema) == _names_and_types(SILVER_USERS_SCHEMA)
 
 
 def test_split_valid_quarantines_null_email(spark: SparkSession) -> None:
@@ -94,9 +96,7 @@ def test_split_valid_keeps_clean_rows(spark: SparkSession) -> None:
     assert rejects.count() == 0
     assert clean.count() == 2
 
-    got = [(f.name, f.dataType) for f in clean.schema.fields]
-    want = [(f.name, f.dataType) for f in SILVER_USERS_SCHEMA.fields]
-    assert got == want
+    assert _names_and_types(clean.schema) == _names_and_types(SILVER_USERS_SCHEMA)
 
 
 def test_dedup_collapses_duplicate_user_row(spark: SparkSession) -> None:

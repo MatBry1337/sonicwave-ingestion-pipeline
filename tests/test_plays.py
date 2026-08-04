@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 
+import pytest
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql.types import DateType, StringType, StructField, StructType
 
@@ -76,30 +77,24 @@ def _only_reason(rejects: DataFrame) -> str:
     return row["reject_reason"]
 
 
-def test_split_valid_quarantines_null_user_id(spark: SparkSession) -> None:
-    df = _source(spark, [_row(play_id="1000"), _row(play_id="1001", user_id=None)])
+@pytest.mark.parametrize(
+    ("bad_row", "reason"),
+    [
+        (_row(play_id="1001", user_id=None), "invalid required field: user_id"),
+        # "NaN" must not crash the job under ANSI; it is quarantined instead.
+        (_row(play_id="1001", ms_played="NaN"), "unparseable ms_played"),
+        (_row(play_id="1001", ms_played="-5000"), "ms_played out of range"),
+    ],
+)
+def test_split_valid_quarantines_bad_rows(spark: SparkSession, bad_row: tuple, reason: str) -> None:
+    df = _source(spark, [_row(play_id="1000"), bad_row])
     clean, rejects = split_valid(df)
-    assert clean.count() == 1
+
+    assert clean.count() == 1  # the good row survives
     assert clean.first()["play_id"] == 1000
     assert rejects.count() == 1
-    assert _only_reason(rejects) == "invalid required field: user_id"
-
-
-def test_split_valid_quarantines_unparseable_ms_played(spark: SparkSession) -> None:
-    # A "NaN" duration must not crash the job under ANSI; it must be quarantined.
-    df = _source(spark, [_row(play_id="1001", ms_played="NaN")])
-    clean, rejects = split_valid(df)
-    assert clean.count() == 0
-    assert rejects.count() == 1
-    assert _only_reason(rejects) == "unparseable ms_played"
-    assert rejects.first()["ms_played"] == "NaN"
-
-
-def test_split_valid_quarantines_negative_ms_played(spark: SparkSession) -> None:
-    df = _source(spark, [_row(play_id="1001", ms_played="-5000")])
-    _clean, rejects = split_valid(df)
-    assert rejects.count() == 1
-    assert _only_reason(rejects) == "ms_played out of range"
+    assert _only_reason(rejects) == reason
+    assert rejects.first()["play_id"] == "1001"  # rejects keep their raw strings
 
 
 def test_split_valid_keeps_clean_rows(spark: SparkSession) -> None:
