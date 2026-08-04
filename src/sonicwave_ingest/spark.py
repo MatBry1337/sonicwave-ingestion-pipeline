@@ -1,14 +1,12 @@
-"""SparkSession construction shared by the entry-points and the seed.
+"""Shared SparkSession builder, so every job and CI get the same config.
 
-One place builds the session so every job — and CI — gets the same engine
-configuration. Two settings here are load-bearing for this pipeline:
+Two settings matter to this pipeline:
 
-* ``spark.sql.sources.partitionOverwriteMode = dynamic`` — lets a Silver write
-  overwrite only the snapshot partition it is loading, which is how ``plays``
-  gets per-snapshot idempotency without a ``MERGE``.
-* ``spark.driver.bindAddress = 127.0.0.1`` — a hosted CI runner (or a
-  sandboxed / VPN'd laptop) can't always bind to its hostname IP; loopback
-  always works.
+* ``partitionOverwriteMode = dynamic`` lets a Silver write overwrite only the
+  snapshot partition it loads, which gives ``plays`` per-snapshot idempotency
+  without a MERGE.
+* ``driver.bindAddress = 127.0.0.1`` keeps Spark on loopback, since a CI runner
+  or sandboxed laptop can't always bind to its hostname IP.
 """
 
 from __future__ import annotations
