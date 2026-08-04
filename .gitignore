@@ -24,3 +24,6 @@ __pycache__/
 .idea/
 .vscode/
 .DS_Store
+
+# Course assignment brief - not part of the deliverable
+project_brief.md
