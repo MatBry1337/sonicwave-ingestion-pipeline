@@ -108,3 +108,19 @@ def test_run_plays_is_idempotent(spark: SparkSession, tmp_path: Path) -> None:
     second = _silver(spark, out).collect()
 
     assert first == second
+
+
+def test_run_plays_stage_split_matches_stage_all(spark: SparkSession, tmp_path: Path) -> None:
+    """Landing then conforming separately must reproduce the single-pass result."""
+    source = _land_drop(tmp_path)
+    out_all = str(tmp_path / "out_all")
+    out_split = str(tmp_path / "out_split")
+
+    run_plays(spark, source, _SNAPSHOT, out_all, _INGESTED_AT)
+
+    run_plays(spark, source, _SNAPSHOT, out_split, _INGESTED_AT, stage="bronze")
+    assert not (Path(out_split) / "silver" / "plays").exists()
+
+    run_plays(spark, source, _SNAPSHOT, out_split, _INGESTED_AT, stage="silver")
+
+    assert _silver(spark, out_split).collect() == _silver(spark, out_all).collect()

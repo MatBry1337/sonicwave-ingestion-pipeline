@@ -97,7 +97,10 @@ the data this pipeline was built and tested against.
   partition. Dedup uses a `row_number()` window over a total ordering, so the
   surviving row is defined rather than arbitrary; without a full ordering the
   winner could flip under a shuffle and break the re-run guarantee. Provenance is
-  deterministic too: `ingested_at` is passed in, not `current_timestamp()`.
+  deterministic too: `ingested_at` is passed in, not `current_timestamp()`. By
+  default it is the snapshot's UTC midnight — a deterministic label chosen so a
+  re-run is byte-identical, not the real wall-clock moment the data was
+  ingested; pass `--ingested-at` for true provenance.
 - **Event vs ingestion time.** `event_date` is derived from `played_at`, so a late
   event (recorded a day after it happened) is dated to when it happened. It still
   lands physically in its arrival snapshot's partition; `event_date` and
