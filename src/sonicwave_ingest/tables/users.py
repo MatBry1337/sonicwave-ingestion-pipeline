@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pyspark.errors import AnalysisException
 from pyspark.sql import Column, DataFrame, SparkSession, Window
 from pyspark.sql import functions as F
 from pyspark.sql.types import (
@@ -155,18 +154,56 @@ def scd2_merge(incoming: DataFrame, existing: DataFrame | None) -> DataFrame:
     return _with_validity(_change_gate(candidates))
 
 
+def _dimension_exists(spark: SparkSession, path: str) -> bool:
+    """Whether `path` already exists, via Spark's own Hadoop FileSystem.
+
+    Works for whatever backend the session is configured against (local disk,
+    HDFS, S3, DBFS...) with the exact same path resolution spark.read.parquet
+    uses — unlike a plain os.path check, which silently reports False for any
+    non-local URI.
+    """
+    assert spark._jvm is not None  # always set on a live SparkSession
+    hadoop_conf = spark._jsc.hadoopConfiguration()
+    jvm_path = spark._jvm.org.apache.hadoop.fs.Path(path)
+    return bool(jvm_path.getFileSystem(hadoop_conf).exists(jvm_path))
+
+
+def _atomic_swap(spark: SparkSession, tmp_path: str, final_path: str) -> None:
+    """Publish tmp_path as final_path without ever leaving final_path partially written.
+
+    final_path is only touched once tmp_path is fully written and this rename
+    runs, so a job killed mid-write leaves the previous dimension at final_path
+    completely untouched — the crashed run just leaves a disposable tmp_path
+    behind, cleaned up by the next attempt's overwrite.
+    """
+    assert spark._jvm is not None  # always set on a live SparkSession
+    hadoop_conf = spark._jsc.hadoopConfiguration()
+    fs = spark._jvm.org.apache.hadoop.fs.FileSystem.get(hadoop_conf)
+    tmp = spark._jvm.org.apache.hadoop.fs.Path(tmp_path)
+    final = spark._jvm.org.apache.hadoop.fs.Path(final_path)
+    if fs.exists(final):
+        fs.delete(final, True)
+    fs.rename(tmp, final)
+
+
 def _read_existing(spark: SparkSession, path: str) -> DataFrame | None:
     """Load the current dimension, or None if this is the first run.
 
+    Checks existence explicitly instead of catching AnalysisException, so a
+    path that exists but can't be read (e.g. left partial by a job killed
+    mid-write) fails loudly instead of being silently treated as "no
+    dimension yet" — see the point 1 write-up for why that matters.
+
     localCheckpoint truncates the frame's lineage so it no longer depends on
-    `path` — needed because run_users overwrites that same path, and Spark
-    refuses to overwrite a location a query is still reading from.
+    `path` — needed because conform_users writes a new dimension while this
+    one is still being read. Safe here specifically because that write goes
+    to a temp path and is swapped in atomically (see _atomic_swap): `path` is
+    never the write target, so this checkpoint is never the only copy of
+    history in flight.
     """
-    try:
-        current = spark.read.parquet(path)
-    except AnalysisException:
+    if not _dimension_exists(spark, path):
         return None
-    return current.localCheckpoint(eager=True)
+    return spark.read.parquet(path).localCheckpoint(eager=True)
 
 
 def land_users(
@@ -196,8 +233,10 @@ def conform_users(spark: SparkSession, bronze: DataFrame, out_root: str) -> None
     snapshot = dedup(clean)
 
     silver_path = f"{out_root}/silver/users"
+    tmp_path = f"{silver_path}_tmp"
     dimension = scd2_merge(snapshot, _read_existing(spark, silver_path))
-    dimension.write.mode("overwrite").parquet(silver_path)
+    dimension.write.mode("overwrite").parquet(tmp_path)
+    _atomic_swap(spark, tmp_path, silver_path)
 
     write_partitioned(rejects, f"{out_root}/quarantine/users")
 

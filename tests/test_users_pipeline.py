@@ -4,6 +4,8 @@ import json
 from datetime import datetime
 from pathlib import Path
 
+import pytest
+from pyspark.errors import AnalysisException
 from pyspark.sql import DataFrame, SparkSession
 
 from sonicwave_ingest.tables.users import run_users
@@ -125,3 +127,60 @@ def test_run_users_stage_split_matches_stage_all(spark: SparkSession, tmp_path: 
     run_users(spark, str(source), "2026-03-01", out_split, _INGESTED_AT, stage="silver")
 
     assert _silver(spark, out_split).collect() == _silver(spark, out_all).collect()
+
+
+def test_run_users_fails_loudly_on_unreadable_dimension(
+    spark: SparkSession, tmp_path: Path
+) -> None:
+    """A dimension path that exists but has no readable parquet (a crash artifact,
+    e.g. a job killed after mode("overwrite") deleted the old files but before
+    any new ones landed) must raise, not be silently treated as "first run".
+    """
+    source = tmp_path / "source" / "users"
+    out = str(tmp_path / "out")
+    _land(source, "2026-03-01", [_user("1", "alice@sonicwave.io")])
+    run_users(spark, str(source), "2026-03-01", out, _INGESTED_AT)
+
+    silver_dir = Path(out) / "silver" / "users"
+    for parquet_file in silver_dir.glob("*.parquet"):
+        parquet_file.unlink()
+
+    _land(source, "2026-03-02", [_user("1", "alice@sonicwave.io", plan_tier="premium")])
+    with pytest.raises(AnalysisException):
+        run_users(spark, str(source), "2026-03-02", out, _INGESTED_AT)
+
+
+def test_run_users_preserves_dimension_when_conform_crashes(
+    spark: SparkSession, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A crash during the dimension write must leave the previous dimension
+    untouched (the atomic-swap guarantee), and a clean retry must recover from
+    it rather than losing history.
+    """
+    source = tmp_path / "source" / "users"
+    out = str(tmp_path / "out")
+    _land(source, "2026-03-01", [_user("1", "alice@sonicwave.io")])
+    _land(
+        source,
+        "2026-03-02",
+        [_user("1", "alice@sonicwave.io", plan_tier="premium", updated_at="2026-03-02T09:00:00")],
+    )
+
+    run_users(spark, str(source), "2026-03-01", out, _INGESTED_AT)
+    before = _silver(spark, out).collect()
+
+    def _simulated_crash(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("simulated crash mid-write")
+
+    monkeypatch.setattr("sonicwave_ingest.tables.users._atomic_swap", _simulated_crash)
+    with pytest.raises(RuntimeError):
+        run_users(spark, str(source), "2026-03-02", out, _INGESTED_AT)
+
+    # the crashed attempt never touched the previously-published dimension.
+    assert _silver(spark, out).collect() == before
+
+    # a clean retry recomputes from the still-intact dimension, not from scratch.
+    monkeypatch.undo()
+    run_users(spark, str(source), "2026-03-02", out, _INGESTED_AT)
+    after = _silver(spark, out)
+    assert after.filter("user_id = 1").count() == 2
