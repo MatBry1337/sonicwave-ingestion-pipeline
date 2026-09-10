@@ -104,3 +104,24 @@ def test_run_users_is_idempotent(spark: SparkSession, tmp_path: Path) -> None:
 
     assert after.count() == before  # no new version opened
     assert after.filter("is_current").count() == after.select("user_id").distinct().count()
+
+
+def test_run_users_stage_split_matches_stage_all(spark: SparkSession, tmp_path: Path) -> None:
+    """Landing then conforming separately must reproduce the single-pass result."""
+    source = tmp_path / "source" / "users"
+    out_all = str(tmp_path / "out_all")
+    out_split = str(tmp_path / "out_split")
+    _land(
+        source,
+        "2026-03-01",
+        [_user("1", "alice@sonicwave.io"), _user("2", "bob@sonicwave.io", plan_tier="premium")],
+    )
+
+    run_users(spark, str(source), "2026-03-01", out_all, _INGESTED_AT)
+
+    run_users(spark, str(source), "2026-03-01", out_split, _INGESTED_AT, stage="bronze")
+    assert not (Path(out_split) / "silver" / "users").exists()
+
+    run_users(spark, str(source), "2026-03-01", out_split, _INGESTED_AT, stage="silver")
+
+    assert _silver(spark, out_split).collect() == _silver(spark, out_all).collect()

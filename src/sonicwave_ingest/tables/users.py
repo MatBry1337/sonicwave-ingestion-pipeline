@@ -169,27 +169,29 @@ def _read_existing(spark: SparkSession, path: str) -> DataFrame | None:
     return current.localCheckpoint(eager=True)
 
 
-def run_users(
+def land_users(
     spark: SparkSession,
     source_dir: str,
     snapshot_date: str,
     out_root: str,
     ingested_at: datetime,
-) -> None:
-    """Run source -> Bronze -> Silver (SCD2) for one users snapshot.
-
-    Mirrors run_plays for the read/Bronze/validate/dedup spine, then differs in the
-    Silver write. Users is an SCD2 dimension, so Silver is the whole history
-    recomputed each run and overwritten as one table, not partitioned by
-    snapshot_date the way plays is. A version spans a range of snapshots
-    (valid_from..valid_to), so it belongs to no single one, and the recompute
-    rewrites the whole dimension regardless.
-    """
+) -> DataFrame:
+    """Read one raw users drop, write it as Bronze, and return it in memory."""
     bronze = read_source(
         spark, f"{source_dir}/{snapshot_date}", SOURCE_USERS_SCHEMA, snapshot_date, ingested_at
     )
     write_partitioned(bronze, f"{out_root}/bronze/users")
+    return bronze
 
+
+def read_bronze_users(spark: SparkSession, out_root: str, snapshot_date: str) -> DataFrame:
+    """Re-read an already-landed Bronze partition, to conform without re-landing."""
+    bronze = spark.read.parquet(f"{out_root}/bronze/users")
+    return bronze.where(F.col("snapshot_date") == snapshot_date)
+
+
+def conform_users(spark: SparkSession, bronze: DataFrame, out_root: str) -> None:
+    """Validate, dedup, and recompute the SCD2 dimension from a Bronze frame."""
     clean, rejects = split_valid(bronze)
     snapshot = dedup(clean)
 
@@ -198,3 +200,28 @@ def run_users(
     dimension.write.mode("overwrite").parquet(silver_path)
 
     write_partitioned(rejects, f"{out_root}/quarantine/users")
+
+
+def run_users(
+    spark: SparkSession,
+    source_dir: str,
+    snapshot_date: str,
+    out_root: str,
+    ingested_at: datetime,
+    *,
+    stage: str = "all",
+) -> None:
+    """Run source -> Bronze -> Silver (SCD2) for one users snapshot, or just one stage.
+
+    Mirrors run_plays's land/conform split. Users is an SCD2 dimension, so
+    conform recomputes the whole history and overwrites it as one table, not
+    partitioned by snapshot_date the way plays is. A version spans a range of
+    snapshots (valid_from..valid_to), so it belongs to no single one.
+    """
+    if stage == "silver":
+        bronze = read_bronze_users(spark, out_root, snapshot_date)
+    else:
+        bronze = land_users(spark, source_dir, snapshot_date, out_root, ingested_at)
+
+    if stage != "bronze":
+        conform_users(spark, bronze, out_root)

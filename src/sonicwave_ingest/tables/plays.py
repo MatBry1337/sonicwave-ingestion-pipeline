@@ -111,27 +111,63 @@ def with_event_date(df: DataFrame) -> DataFrame:
     return df.withColumn("event_date", F.to_date("played_at"))
 
 
-def run_plays(
+def land_plays(
     spark: SparkSession,
     source_dir: str,
     snapshot_date: str,
     out_root: str,
     ingested_at: datetime,
-) -> None:
-    """Run source -> Bronze -> Silver for one plays snapshot.
-
-    Silver continues from the in-memory Bronze frame; persisted Bronze is a
-    durable side-artifact, not re-read. snapshot_date is re-stamped on Silver
-    because the clean projection keeps only the typed business columns.
-    """
+) -> DataFrame:
+    """Read one raw plays drop, write it as Bronze, and return it in memory."""
     bronze = read_source(
         spark, f"{source_dir}/{snapshot_date}", SOURCE_PLAYS_SCHEMA, snapshot_date, ingested_at
     )
     write_partitioned(bronze, f"{out_root}/bronze/plays")
+    return bronze
 
+
+def read_bronze_plays(spark: SparkSession, out_root: str, snapshot_date: str) -> DataFrame:
+    """Re-read an already-landed Bronze partition, so Silver can be conformed without re-landing."""
+    bronze = spark.read.parquet(f"{out_root}/bronze/plays")
+    return bronze.where(F.col("snapshot_date") == snapshot_date)
+
+
+def conform_plays(bronze: DataFrame, snapshot_date: str, out_root: str) -> None:
+    """Validate, dedup, and write Silver + quarantine from a Bronze frame.
+
+    snapshot_date is re-stamped on Silver because the clean projection keeps
+    only the typed business columns.
+    """
     clean, rejects = split_valid(bronze)
     silver = with_event_date(dedup(clean)).withColumn(
         "snapshot_date", F.lit(snapshot_date).cast(DateType())
     )
     write_partitioned(silver, f"{out_root}/silver/plays")
     write_partitioned(rejects, f"{out_root}/quarantine/plays")
+
+
+def run_plays(
+    spark: SparkSession,
+    source_dir: str,
+    snapshot_date: str,
+    out_root: str,
+    ingested_at: datetime,
+    *,
+    stage: str = "all",
+) -> None:
+    """Run source -> Bronze -> Silver for one plays snapshot, or just one stage.
+
+    stage="all" (default) lands and conforms from the same in-memory Bronze
+    frame, so conform always sees exactly the snapshot that was just landed —
+    the single-consistent-as-of guarantee. stage="bronze" only lands.
+    stage="silver" re-reads the already-landed Bronze partition and conforms
+    it, without touching the source — the seam a backfill-after-landing or a
+    granular-retry orchestrator needs.
+    """
+    if stage == "silver":
+        bronze = read_bronze_plays(spark, out_root, snapshot_date)
+    else:
+        bronze = land_plays(spark, source_dir, snapshot_date, out_root, ingested_at)
+
+    if stage != "bronze":
+        conform_plays(bronze, snapshot_date, out_root)
